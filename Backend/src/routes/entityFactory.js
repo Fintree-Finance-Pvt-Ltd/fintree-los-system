@@ -1,15 +1,14 @@
+// src/routes/entityFactory.js
 const express = require('express');
-const { z } = require('zod');
 const db = require('../db');
 const { requirePerm } = require('../middleware/permissions');
 const { audit } = require('../middleware/audit');
 const { nextCode } = require('../lib/seq');
 
 // helpers
-const toInt = (v, def=0) => Number.isFinite(+v) ? Math.max(+v, 0) : def;
-const jsonAny = z.any();
+const toInt = (v, def = 0) => Number.isFinite(+v) ? Math.max(+v, 0) : def;
 
-// ✅ helper: ensure custom is an object (parse when a JSON string is sent)
+// ensure custom is an object (parse when a JSON string is sent)
 function normalizeBodyForZod(body) {
   const v = { ...body };
   if (typeof v.custom === 'string') {
@@ -19,22 +18,29 @@ function normalizeBodyForZod(body) {
   return v;
 }
 
-/**
- * makeEntityRouter({
- *   entityName: 'dealer',
- *   table: 'dealers',
- *   codeField: 'dealer_id',
- *   codePrefix: 'DLR',
- *   jsonColumn: 'custom_data',           // null if table has no JSON column
- *   defaultStatus: 'PENDING',            // null/undefined to skip status
- *   searchColumns: ['dealer_name','email','dealer_phone'],
- *   perms: { READ:'DEALERS_READ', WRITE:'DEALERS_WRITE', REVIEW:'DEALERS_REVIEW' },
- *   createSchema: z.object({...}),       // zod schema for CREATE (body)
- *   updateSchema: z.object({...}).partial(),
- *   bulkItemSchema: z.object({...}).partial(), // for /bulk
- *   mapBodyToRow: (body) => ({ ...dbCols })    // body -> exact DB column names for this table
- * })
- */
+function zodValidate(schema, data) {
+  const body = normalizeBodyForZod(data);
+
+  // classic wrapper path
+  if (schema && typeof schema.safeParse === 'function' && '_zod' in schema) {
+    return schema.safeParse(body);
+  }
+
+  // core (or anything else with .parse)
+  if (schema && typeof schema.parse === 'function') {
+    try {
+      const parsed = schema.parse(body);
+      return { success: true, data: parsed };
+    } catch (err) {
+      // emulate Zod's safeParse error shape when possible
+      return { success: false, error: err };
+    }
+  }
+
+  // not a Zod schema
+  return { success: false, error: new Error('Invalid Zod schema passed to validator') };
+}
+
 function makeEntityRouter(cfg) {
   const r = express.Router();
   const {
@@ -106,22 +112,19 @@ function makeEntityRouter(cfg) {
     audit('CREATE', entityName),
     async (req, res, next) => {
       try {
-        // validate body
-        const raw = normalizeBodyForZod(req.body);
-      const v = createSchema.parse(raw);
+        const parsed = zodValidate(createSchema, req.body);
+        if (!parsed.success) {
+          return res.status(400).json({
+            error: 'Validation failed',
+            details: parsed.error?.issues || parsed.error?.message || String(parsed.error),
+          });
+        }
+        const v = parsed.data;
 
-        // generate human code (e.g., DLR00101)
         const code = await nextCode(entityName, codePrefix);
-
-        // map body -> db columns
         const baseCols = mapBodyToRow(v);
 
-        // add code field, optional status, optional JSON column
-        const row = {
-          [codeField]: code,
-          ...baseCols,
-        };
-
+        const row = { [codeField]: code, ...baseCols };
         if (defaultStatus) row.status = defaultStatus;
 
         if (jsonColumn && v.custom && typeof v.custom === 'object') {
@@ -140,8 +143,15 @@ function makeEntityRouter(cfg) {
     audit('UPDATE', entityName),
     async (req, res, next) => {
       try {
-        const raw = normalizeBodyForZod(req.body);
-      const v = updateSchema.parse(raw);
+        const parsed = zodValidate(updateSchema, req.body);
+        if (!parsed.success) {
+          return res.status(400).json({
+            error: 'Validation failed',
+            details: parsed.error?.issues || parsed.error?.message || String(parsed.error),
+          });
+        }
+        const v = parsed.data;
+
         const patch = mapBodyToRow(v);
 
         if (jsonColumn && v.custom !== undefined) {
@@ -171,16 +181,23 @@ function makeEntityRouter(cfg) {
 
         for (let i = 0; i < rawItems.length; i++) {
           try {
-            const v = bulkItemSchema.parse(rawItems[i]);     // forgiving schema
+            const parsed = zodValidate(bulkItemSchema, rawItems[i]);
+            if (!parsed.success) {
+              errors.push({ index: i, error: 'validation_error', details: parsed.error?.issues || parsed.error?.message });
+              continue;
+            }
+            const v = parsed.data;
+
             const code = await nextCode(entityName, codePrefix);
             const baseCols = mapBodyToRow(v);
 
             const row = { [codeField]: code, ...baseCols };
             if (defaultStatus) row.status = defaultStatus;
+
             if (jsonColumn && v.custom && typeof v.custom === 'object') {
               row[jsonColumn] = Object.keys(v.custom).length ? JSON.stringify(v.custom) : null;
             }
-            // require a minimal field (example: at least one name-like field)
+
             if (!Object.values(baseCols).some(Boolean)) throw new Error('empty_row');
 
             toInsert.push(row);

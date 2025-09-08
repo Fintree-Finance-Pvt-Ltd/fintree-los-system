@@ -1,6 +1,6 @@
 const router = require('express').Router();
 const db = require('../db');
-const { z } = require('zod');
+const { z } = require('zod/v4/classic'); ;
 const { requirePerm } = require('../middleware/permissions');
 const { audit } = require('../middleware/audit'); // ✅ already imported
 
