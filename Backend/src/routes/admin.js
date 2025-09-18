@@ -48,6 +48,27 @@ router.post('/users',
   }
 );
 
+router.post('/roles/create',
+  requirePerm('RBAC_MANAGE'),
+  audit('CREATE','role'), async (req, res, next) => {
+    try{
+      const schema = z.object({
+        roleCode: z.string().max(191),
+        roleName: z.string().max(191).optional().or(z.literal('')).transform(v=>v||null),
+        is_active: z.boolean().optional().default(true)
+      });
+      const data = schema.parse(req.body);
+      const existingRole = await db('roles').where({ code: data.roleCode }).first();
+      if(existingRole){
+        return res.status(400).json({ error: 'Role code already exists' });
+      }
+      const [id] = await db('roles').insert({ code: data.roleCode, name: data.roleName });
+      res.locals.entityId = id;
+      res.status(201).json({ id });
+    } catch (e) { next(e); }
+  }
+);
+
 /** PUT /admin/users/:id -> update name/is_active */
 router.put('/users/:id',
   requirePerm('RBAC_MANAGE'),
